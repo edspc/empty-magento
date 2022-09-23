@@ -1,0 +1,51 @@
+on:
+  push:
+    branches:
+      - main
+
+env:
+  SSH_AUTH_SOCK: /tmp/ssh_agent.sock
+  MAGENTO_LOCALES: en_US fr_FR
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    environment: staging
+    steps:
+      - name: Add SSH key to agent
+        run: |
+          mkdir -p ~/.ssh
+          cat >> ~/.ssh/config <<END
+          Host target
+            HostName ${{ secrets.SSH_HOST }}
+            User ${{ secrets.SSH_USER }}
+            Port ${{ secrets.SSH_PORT }}
+            ForwardAgent yes
+            ConnectTimeout 15
+            ControlMaster auto
+            ControlPersist 60s
+            ControlPath /tmp/%r@%h:%p
+          END
+          ssh-keyscan -t ed25519 -p "${{ secrets.SSH_PORT }}" "${{ secrets.SSH_HOST }}" >> ~/.ssh/known_hosts
+          echo "${{ secrets.SSH_KEY }}" > ~/.ssh/github_actions
+          chmod 600 ~/.ssh/github_actions
+          ssh-agent -a $SSH_AUTH_SOCK > /dev/null
+          ssh-add ~/.ssh/github_actions
+      - name: Enable maintenance mode
+        run: ssh target "cd "${{ secrets.MAGE_ROOT }}" && php bin/magento maintenance:enable"
+      - name: Clear generated files
+        run: ssh target "cd "${{ secrets.MAGE_ROOT }}" && rm -rf generated/* var/cache/* var/page_cache/* var/view_preprocessed/*"
+      - name: Pull updates
+        run: ssh target "cd "${{ secrets.MAGE_ROOT }}" && git fetch --all && git reset "${GITHUB_REF_NAME}" --hard"
+      - name: Install dependencies
+        run: ssh target "cd "${{ secrets.MAGE_ROOT }}" && composer install --no-dev --no-interaction --no-progress --no-suggest --optimize-autoloader"
+      - name: Run setup:upgrade
+        run: ssh target "cd "${{ secrets.MAGE_ROOT }}" && php bin/magento setup:upgrade"
+      - name: Run setup:di:compile
+        run: ssh target "cd "${{ secrets.MAGE_ROOT }}" && php bin/magento setup:di:compile"
+      - name: Run setup:static-content:deploy
+        run: ssh target "cd "${{ secrets.MAGE_ROOT }}" && php bin/magento setup:static-content:deploy -j"$(nproc)" -f -s standard ${MAGENTO_LOCALES[@]}"
+      - name: Disable maintenance mode
+        run: ssh target "cd "${{ secrets.MAGE_ROOT }}" && php bin/magento maintenance:disable"
+      - name: Flush cache
+        run: ssh target "cd "${{ secrets.MAGE_ROOT }}" && php bin/magento cache:flush"
